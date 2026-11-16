@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intraday desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#E8ECEF; --surface:#FFFFFF; --ink:#101820; --muted:#5A6670; --line:#CAD2D8;
+  --gain:#0B7A5A; --gain-bg:#DDF1EA; --loss:#BF3B2C; --loss-bg:#F8E1DD; --warn:#B87503; --warn-bg:#FBEBC8;
+  --ui:"Familjen Grotesk",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --num:"Spline Sans Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;color:var(--ink);font:16px/1.45 var(--ui);-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:20px 16px 56px}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-.01em;margin-right:auto}
+.chip{font-size:14px;font-weight:600;padding:4px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.chip.paper{background:var(--warn-bg);border-color:#E9C877;color:#7A4D00}
+.chip.live{background:var(--loss-bg);border-color:#E6A99F;color:#8C2417}
+.chip.on{background:var(--warn-bg);border-color:#E9C877;color:#7A4D00}
+.chip.locked{background:var(--loss);border-color:var(--loss);color:#fff}
+.clock{font-family:var(--num);font-size:15px;color:var(--muted)}
+.banner{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:12px 14px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.banner.bad{background:var(--loss-bg);border-color:#E6A99F}
+.banner p{margin:0;flex:1 1 260px}
+.runway{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;margin-bottom:16px}
+.pnl-row{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.pnl{font-family:var(--num);font-size:clamp(40px,8vw,68px);font-weight:600;letter-spacing:-.03em;line-height:1}
+.pnl.gain{color:var(--gain)} .pnl.loss{color:var(--loss)}
+.pnl-note{color:var(--muted);font-size:15px}
+.track{position:relative;height:40px;margin:26px 0 8px}
+.rail{position:absolute;left:0;right:0;top:15px;height:10px;border-radius:5px;background:linear-gradient(90deg,var(--loss-bg) 0 33.33%,#EEF1F3 33.33% 100%)}
+.fill{position:absolute;top:15px;height:10px;border-radius:5px;transition:left .4s,width .4s}
+.zero{position:absolute;left:33.33%;top:6px;width:2px;height:28px;background:var(--ink)}
+.kill{position:absolute;left:0;top:6px;width:4px;height:28px;background:var(--loss);border-radius:2px}
+.dot{position:absolute;top:10px;width:20px;height:20px;margin-left:-10px;border-radius:50%;background:var(--ink);border:3px solid var(--surface);box-shadow:0 0 0 1px var(--ink);transition:left .4s}
+.scale{position:relative;height:18px;font-size:13px;color:var(--muted);font-family:var(--num)}
+.scale span{position:absolute;white-space:nowrap}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
+section{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 16px 12px;margin-bottom:16px}
+h2{font-size:17px;font-weight:700;margin:0 0 10px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th{font-weight:500;color:var(--muted);text-align:left;padding:4px 8px 6px 0;border-bottom:1px solid var(--line);font-size:14px}
+td{padding:8px 8px 8px 0;border-bottom:1px solid #EDF0F2;vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;font-family:var(--num);font-variant-numeric:tabular-nums;padding-right:0;padding-left:8px}
+th.n{font-family:var(--ui)}
+.gain{color:var(--gain)} .loss{color:var(--loss)}
+.empty{color:var(--muted);padding:6px 0 10px;margin:0}
+.tablewrap{overflow-x:auto}
+.btns{display:flex;flex-direction:column;gap:10px}
+button{font:600 16px var(--ui);padding:12px 14px;border-radius:9px;border:1.5px solid var(--ink);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left}
+button:hover{background:#F3F5F6}
+button:focus-visible,input:focus-visible{outline:3px solid #6AA7F2;outline-offset:2px}
+button.primary{background:var(--ink);color:#fff}
+button.primary:hover{background:#26323C}
+button.danger{border-color:var(--loss);color:var(--loss)}
+button.danger:hover{background:var(--loss-bg)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button small{display:block;font-weight:400;font-size:13px;color:inherit;opacity:.75;margin-top:2px}
+.rules{margin:12px 0 4px;padding:0;list-style:none;font-size:14px;color:var(--muted)}
+.rules li{padding:2px 0}
+.log{max-height:340px;overflow:auto;font-family:var(--num);font-size:13px;line-height:1.5}
+.log div{padding:3px 0;border-bottom:1px solid #EDF0F2}
+.log .t{color:var(--muted);margin-right:8px}
+.log .CRITICAL,.log .ERROR{color:var(--loss);font-weight:600}
+.log .WARN{color:var(--warn)}
+#gate{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;padding:20px;z-index:10}
+#gate form{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px;width:min(380px,100%)}
+#gate input{width:100%;font:16px var(--ui);padding:11px;border:1.5px solid var(--line);border-radius:8px;margin:10px 0 12px}
+#gate p{margin:0;color:var(--muted)}
+#gate .err{color:var(--loss);min-height:20px;margin:0 0 8px}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div id="gate"><form id="gateform"><h2>Intraday desk</h2><p>Enter the dashboard password.</p><input id="pw" type="password" autocomplete="current-password" aria-label="Dashboard password"><p class="err" id="gerr"></p><button class="primary" type="submit">Open dashboard</button></form></div>
+
+<div class="wrap">
+  <header>
+    <h1>Intraday desk</h1>
+    <span class="chip" id="mode"></span>
+    <span class="chip" id="status"></span>
+    <span class="clock" id="clock"></span>
+  </header>
+  <div id="banners"></div>
+
+  <div class="runway" aria-label="Today's profit and loss against the daily loss limit">
+    <div class="pnl-row"><div class="pnl" id="pnl">0.00</div><div class="pnl-note" id="pnlnote"></div></div>
+    <div class="track">
+      <div class="rail"></div><div class="fill" id="fill"></div>
+      <div class="kill" title="Kill-switch level"></div><div class="zero"></div><div class="dot" id="dot"></div>
+    </div>
+    <div class="scale"><span id="s-left" style="left:0"></span><span id="s-zero" style="left:33.33%;transform:translateX(-50%)">0</span><span id="s-right" style="right:0"></span></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <section><h2>Open positions</h2><div id="pos"></div></section>
+      <section><h2>Closed today</h2><div id="closed"></div></section>
+      <section><h2>Watchlist</h2><div id="watch"></div></section>
+    </div>
+    <div>
+      <section><h2>Controls</h2>
+        <div class="btns">
+          <button id="b-login">Log in to Zerodha<small>Needed once every morning</small></button>
+          <button id="b-arm" class="primary">Arm bot<small>Allow new entries</small></button>
+          <button id="b-disarm">Disarm<small>No new entries; stops stay on open positions</small></button>
+          <button id="b-kill" class="danger">Kill-switch<small>Cancel orders, exit everything, lock until tomorrow</small></button>
+        </div>
+        <ul class="rules" id="rules"></ul>
+      </section>
+      <section><h2>Activity</h2><div class="log" id="log"></div></section>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const inr = (n, d = 2) => (n == null ? "-" : Number(n).toLocaleString("en-IN", {minimumFractionDigits: d, maximumFractionDigits: d}));
+const sgn = n => (n > 0 ? "+" : "") + inr(n);
+const cls = n => n > 0 ? "gain" : n < 0 ? "loss" : "";
+let token = sessionStorage.getItem("tok") || "";
+let S = null;
+
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+
+async function api(path, method = "GET") {
+  const r = await fetch(path, {method, headers: {"x-admin-token": token}});
+  if (r.status === 401) { showGate(token ? "Wrong password" : ""); throw new Error("auth"); }
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch (e) {} throw new Error(m); }
+  return r.json();
+}
+function showGate(msg){ $("gate").style.display = "flex"; $("gerr").textContent = msg || ""; $("pw").focus(); }
+$("gateform").onsubmit = e => { e.preventDefault(); token = $("pw").value; sessionStorage.setItem("tok", token); $("gate").style.display = "none"; tick(); };
+
+function table(cols, rows) {
+  if (!rows.length) return "";
+  return `<div class="tablewrap"><table><thead><tr>${cols.map(c => `<th class="${c.n ? "n" : ""}">${c.h}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map(r => `<tr>${cols.map(c => `<td class="${c.n ? "n" : ""} ${c.c ? c.c(r) : ""}">${c.f(r)}</td>`).join("")}</tr>`).join("") + `</tbody></table></div>`;
+}
+
+function render(s) {
+  S = s;
+  $("mode").textContent = s.mode === "live" ? "Live orders" : "Paper trading";
+  $("mode").className = "chip " + s.mode;
+  let st = "Disarmed", sc = "chip";
+  if (s.killed) { st = "Locked for today"; sc = "chip locked"; }
+  else if (s.eod_done) st = "Squared off for the day";
+  else if (s.armed) { st = "Armed"; sc = "chip on"; }
+  $("status").textContent = s.connected ? st : "Not logged in";
+  $("status").className = s.connected ? sc : "chip";
+  $("clock").textContent = s.now + " IST";
+
+  // banners
+  let b = "";
+  if (!s.keys_set) b += `<div class="banner bad"><p>Kite API key and secret are not set on the server. Add KITE_API_KEY and KITE_API_SECRET in Railway variables.</p></div>`;
+  if (s.keys_set && !s.connected) b += `<div class="banner"><p>${s.error ? esc(s.error) + " " : ""}Log in to Zerodha to start the price feed. Zerodha logins expire every morning.</p></div>`;
+  if (s.killed && s.lock) b += `<div class="banner bad"><p><b>Locked for today.</b> ${esc(s.lock.reason)}. Restarting the server will not unlock it. It clears tomorrow.</p></div>`;
+  if (s.connected && s.last_tick_age != null && s.last_tick_age > 60 && s.now > "09:16:00" && s.now < "15:30:00")
+    b += `<div class="banner bad"><p>No price ticks for ${Math.round(s.last_tick_age)} seconds. Open positions are still protected by their exchange stop-loss orders.</p></div>`;
+  $("banners").innerHTML = b;
+
+  // runway: left end = kill level, zero at 1/3, right end = +2x limit
+  const L = s.loss_limit || 1, p = s.day_pnl || 0;
+  const pos = v => Math.max(0, Math.min(100, (v + L) / (3 * L) * 100));
+  const x = pos(p), z = 33.33;
+  $("dot").style.left = x + "%";
+  const f = $("fill");
+  f.style.left = Math.min(x, z) + "%"; f.style.width = Math.abs(x - z) + "%";
+  f.style.background = p >= 0 ? "var(--gain)" : "var(--loss)";
+  $("pnl").textContent = sgn(p); $("pnl").className = "pnl " + cls(p);
+  const used = p < 0 ? Math.min(100, -p / L * 100) : 0;
+  $("pnlnote").textContent = p < 0 ? `${used.toFixed(0)}% of today's loss limit used` : "Day P&L before brokerage and taxes";
+  $("s-left").textContent = "-" + inr(L, 0) + " kill-switch";
+  $("s-right").textContent = "+" + inr(2 * L, 0);
+
+  $("pos").innerHTML = table(
+    [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b>`}, {h: "Qty", n: 1, f: r => r.qty}, {h: "Avg", n: 1, f: r => inr(r.avg)},
+     {h: "LTP", n: 1, f: r => inr(r.ltp)}, {h: "P&L", n: 1, f: r => sgn(r.pnl), c: r => cls(r.pnl)}], s.positions) || `<p class="empty">No open positions.</p>`;
+  const ot = s.open_trades || [];
+  if (ot.length) $("pos").innerHTML += `<h2 style="margin-top:14px">Bot-managed stops and targets</h2>` + table(
+    [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b> ${r.side.toLowerCase()}`}, {h: "Stop", n: 1, f: r => inr(r.stop)}, {h: "Target", n: 1, f: r => inr(r.target)}, {h: "State", f: r => r.state}], ot);
+
+  $("closed").innerHTML = table(
+    [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b> ${r.side.toLowerCase()}`}, {h: "In", n: 1, f: r => inr(r.entry)}, {h: "Out", n: 1, f: r => inr(r.exit)},
+     {h: "Exit reason", f: r => esc(r.reason)}, {h: "Gross P&L", n: 1, f: r => sgn(r.pnl), c: r => cls(r.pnl)}], s.closed_trades || []) || `<p class="empty">No trades closed yet today.</p>`;
+
+  $("watch").innerHTML = table(
+    [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b>`}, {h: "LTP", n: 1, f: r => inr(r.ltp)},
+     {h: "Opening range", n: 1, f: r => r.range ? `${inr(r.range.low)} to ${inr(r.range.high)}${r.range.complete ? "" : " (forming)"}` : "-"}], s.watch || []) || `<p class="empty">The watchlist appears after login.</p>`;
+
+  const r = s.rules || {};
+  $("rules").innerHTML = r.max_open == null ? "" :
+    `<li>Risk per trade: ${r.risk_per_trade_pct}% of capital</li><li>Max open positions: ${r.max_open}</li><li>No new entries after ${r.no_new_entry} IST</li><li>Automatic exit at ${r.square_off} IST</li><li>Capital: ${inr(s.capital, 0)}</li>`;
+
+  $("log").innerHTML = (s.events || []).map(e => `<div><span class="t">${esc(e.ts)}</span><span class="${esc(e.level)}">${esc(e.msg)}</span></div>`).join("") || `<p class="empty">Nothing yet.</p>`;
+
+  $("b-login").disabled = !s.keys_set;
+  $("b-arm").disabled = !s.connected || s.killed || s.eod_done || s.armed;
+  $("b-disarm").disabled = !s.armed;
+  $("b-kill").disabled = !s.connected || s.killed;
+}
+
+async function tick() {
+  try { render(await api("/api/state")); } catch (e) { if (e.message !== "auth") console.error(e); }
+}
+async function act(path, ok) {
+  try { await api(path, "POST"); await tick(); } catch (e) { alert(e.message); }
+}
+
+$("b-login").onclick = async () => { try { location.href = (await api("/api/login-url")).url; } catch (e) { alert(e.message); } };
+$("b-arm").onclick = () => {
+  if (S.mode === "live") {
+    const t = prompt("Live mode places real orders with real money.\nType LIVE to arm the bot for today.");
+    if (t !== "LIVE") return;
+  } else if (!confirm("Arm the bot in paper mode? Fills are simulated.")) return;
+  act("/api/arm");
+};
+$("b-disarm").onclick = () => act("/api/disarm");
+$("b-kill").onclick = () => { if (confirm("Cancel all orders, exit every position and lock the bot until tomorrow?")) act("/api/kill"); };
+
+if (!token) showGate(""); else tick();
+setInterval(tick, 2000);
+if (new URLSearchParams(location.search).get("login") === "failed") alert("Zerodha login failed. Check the redirect URL and API secret.");
+</script>
+</body>
+</html>
