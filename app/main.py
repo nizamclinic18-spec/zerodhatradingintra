@@ -1,5 +1,6 @@
 import hmac
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,10 +9,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from kiteconnect import KiteConnect
 
+from . import backtest as bt
 from .broker import LiveBroker, PaperBroker
 from .clock import now_ist
 from .config import load
 from .engine import Engine
+from .registry import STRATEGIES, make_strategy
 from .store import Store
 from .ticker import TickerService
 
@@ -26,6 +29,9 @@ class Runtime:
     engine = None
     ticker = None
     error = None
+    kite = None
+    tokens = {}
+    bt = {"state": "idle", "msg": ""}
 
     def connect(self, access_token: str):
         kite = KiteConnect(api_key=cfg.api_key)
@@ -36,6 +42,7 @@ class Runtime:
                 if i["tradingsymbol"] in wanted and i["instrument_type"] == "EQ" and i["segment"] == "NSE"}
         missing = wanted - set(toks)
         broker = LiveBroker(kite) if cfg.mode == "live" else PaperBroker()
+        self.kite, self.tokens = kite, toks
         self.shutdown()
         self.engine = Engine(cfg, store, broker)
         if missing:
@@ -165,3 +172,43 @@ def kill(request: Request):
     auth(request)
     need_engine().kill_switch("Manual kill-switch from dashboard")
     return {"ok": True}
+
+
+# ---------- backtesting ----------
+@app.post("/api/backtest/download")
+def bt_download(request: Request, days: int = 90):
+    auth(request)
+    if not rt.kite:
+        raise HTTPException(409, "Log in to Zerodha first")
+    if rt.bt["state"] == "running":
+        raise HTTPException(409, "A download is already running")
+    days = max(10, min(days, 365))
+
+    def work():
+        rt.bt.update(state="running", msg="Starting")
+        try:
+            bt.download(cfg, rt.kite, rt.tokens, days, rt.bt)
+            rt.bt.update(state="done", msg=f"Downloaded {days} days for {len(rt.tokens)} symbols")
+        except Exception as e:
+            rt.bt.update(state="error", msg=f"Download failed: {e}")
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
+@app.get("/api/backtest/status")
+def bt_status(request: Request):
+    auth(request)
+    return {**rt.bt, "strategies": sorted(STRATEGIES)}
+
+
+@app.get("/api/backtest/run")
+def bt_run(request: Request, strategy: str = "orb"):
+    auth(request)
+    if strategy not in STRATEGIES:
+        raise HTTPException(400, "Unknown strategy")
+    res = bt.backtest(cfg, cfg.watchlist, lambda c: make_strategy(c, strategy))
+    if not res:
+        raise HTTPException(409, "No price history yet. Click 'Download price history' first.")
+    res["strategy"] = strategy
+    return res

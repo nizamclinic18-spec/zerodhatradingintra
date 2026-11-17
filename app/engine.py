@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .candles import CandleBuilder
 from .clock import now_ist
 from .risk import Risk
-from .strategy import ORBStrategy
+from .registry import make_strategy
 
 log = logging.getLogger("engine")
 TICK = 0.05
@@ -20,7 +20,7 @@ class Engine:
     def __init__(self, cfg, store, broker, now_fn=now_ist):
         self.cfg, self.store, self.broker, self.now = cfg, store, broker, now_fn
         self.risk = Risk(cfg)
-        self.strategy = ORBStrategy(cfg)
+        self.strategy = make_strategy(cfg)
         self.candles = CandleBuilder(cfg.candle_minutes)
         self.ltp = {}
         self.trades = {}          # symbol -> open trade dict
