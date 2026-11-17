@@ -79,7 +79,9 @@ def run(cfg, candles, factory, slippage_bps=2.0):
         cost = trade_cost(tr["side"], tr["qty"], tr["entry"], px)
         trades.append({"day": str(day), "symbol": tr["symbol"], "side": tr["side"], "qty": tr["qty"],
                        "entry": round(tr["entry"], 2), "exit": round(px, 2), "gross": round(gross, 2),
-                       "cost": round(cost, 2), "net": round(gross - cost, 2), "reason": reason})
+                       "cost": round(cost, 2), "net": round(gross - cost, 2), "reason": reason,
+                       "stop_pct": round(tr["stop_pct"], 2), "time": tr["etime"],
+                       "value": round(tr["entry"] * tr["qty"])})
         return gross
 
     for day in sorted(by_day):
@@ -102,7 +104,9 @@ def run(cfg, candles, factory, slippage_bps=2.0):
                     if qty > 0:
                         buy = sig.side == "BUY"
                         open_[sym] = {"symbol": sym, "side": sig.side, "qty": qty, "stop": sig.stop,
-                                      "target": sig.target, "entry": sig.entry * (1 + slip if buy else 1 - slip)}
+                                      "target": sig.target, "entry": sig.entry * (1 + slip if buy else 1 - slip),
+                                      "stop_pct": abs(sig.entry - sig.stop) / sig.entry * 100,
+                                      "etime": close_t.strftime("%H:%M")}
             if not killed:
                 unreal = sum((last[s] - o["entry"]) * o["qty"] * (1 if o["side"] == "BUY" else -1) for s, o in open_.items())
                 if risk.breached(realized + unreal):
@@ -141,10 +145,69 @@ def summarize(trades, days):
             "last_30": block([t for t in trades if t["day"] in b], b)}
 
 
+def _rows(trades, keyfn, order=None):
+    groups = defaultdict(list)
+    for t in trades:
+        groups[keyfn(t)].append(t)
+    rows = []
+    for k in (order if order else sorted(groups)):
+        ts = groups.get(k)
+        if not ts:
+            continue
+        n = len(ts)
+        net = sum(x["net"] for x in ts)
+        rows.append({"label": k, "trades": n, "win_rate": round(sum(1 for x in ts if x["net"] > 0) / n * 100, 1),
+                     "gross": round(sum(x["gross"] for x in ts), 2), "cost": round(sum(x["cost"] for x in ts), 2),
+                     "net": round(net, 2), "avg_net": round(net / n, 2), "small": n < 20})
+    return rows
+
+
+STOP_BUCKETS = ["under 0.3%", "0.3% to 0.5%", "0.5% to 0.75%", "0.75% to 1%", "1% or more"]
+TIME_BUCKETS = ["09:30 to 10:00", "10:00 to 11:00", "11:00 to 12:30", "12:30 to 14:30"]
+
+
+def _stop_bucket(t):
+    x = t["stop_pct"]
+    return STOP_BUCKETS[0 if x < 0.3 else 1 if x < 0.5 else 2 if x < 0.75 else 3 if x < 1 else 4]
+
+
+def _time_bucket(t):
+    h, m = map(int, t["time"].split(":"))
+    mins = h * 60 + m
+    return TIME_BUCKETS[0 if mins < 600 else 1 if mins < 660 else 2 if mins < 750 else 3]
+
+
+def diagnostics(cfg, trades):
+    """Where the money is made or lost. Rows with fewer than 20 trades are flagged as noise."""
+    n = len(trades)
+    if not n:
+        return None
+    wins = [t["net"] for t in trades if t["net"] > 0]
+    losses = [-t["net"] for t in trades if t["net"] <= 0]
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    risk = cfg.capital * cfg.risk_per_trade_pct / 100.0
+    head = {"trades": n, "gross_per_trade": round(sum(t["gross"] for t in trades) / n, 2),
+            "charges_per_trade": round(sum(t["cost"] for t in trades) / n, 2),
+            "net_per_trade": round(sum(t["net"] for t in trades) / n, 2),
+            "charges_pct_of_risk": round(sum(t["cost"] for t in trades) / n / risk * 100, 1),
+            "win_rate": round(len(wins) / n * 100, 1), "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2),
+            "breakeven_win_rate": round(avg_loss / (avg_win + avg_loss) * 100, 1) if avg_win + avg_loss else None,
+            "avg_position_value": round(sum(t["value"] for t in trades) / n)}
+    return {"headline": head,
+            "by_side": _rows(trades, lambda t: "Long (BUY)" if t["side"] == "BUY" else "Short (SELL)"),
+            "by_symbol": _rows(trades, lambda t: t["symbol"]),
+            "by_stop_width": _rows(trades, _stop_bucket, STOP_BUCKETS),
+            "by_entry_time": _rows(trades, _time_bucket, TIME_BUCKETS),
+            "by_exit": _rows(trades, lambda t: t["reason"]),
+            "by_month": _rows(trades, lambda t: t["day"][:7])}
+
+
 def backtest(cfg, symbols, factory, slippage_bps=2.0):
     candles = load(cfg, symbols)
     if not candles:
         return None
     trades = run(cfg, candles, factory, slippage_bps)
     days = {str(c["start"].date()) for cs in candles.values() for c in cs}
-    return {"symbols": sorted(candles), "summary": summarize(trades, days), "trades": trades[-40:]}
+    return {"symbols": sorted(candles), "summary": summarize(trades, days), "diagnostics": diagnostics(cfg, trades),
+            "trades": trades[-40:]}
