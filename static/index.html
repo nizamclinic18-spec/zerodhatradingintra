@@ -81,6 +81,16 @@ button small{display:block;font-weight:400;font-size:13px;color:inherit;opacity:
 .bt-row select,.bt-row input{font:16px var(--ui);padding:9px 10px;border:1.5px solid var(--line);border-radius:8px;background:var(--surface)}
 .bt-row input{width:80px}
 .bt-row button{padding:10px 14px}
+.trk-add{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.trk-add input{flex:1 1 200px;font:16px var(--ui);padding:9px 10px;border:1.5px solid var(--line);border-radius:8px}
+.trk-add button{padding:9px 14px}
+button.x{border:0;background:none;padding:2px 8px;font-size:18px;line-height:1;color:var(--muted);text-align:center}
+button.x:hover{color:var(--loss);background:none}
+.alert{border:1.5px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.alert.new{background:var(--warn-bg);border-color:#E9C877}
+.alert b.BUY{color:var(--gain)} .alert b.SELL{color:var(--loss)}
+.alert .lv{font-family:var(--num);font-size:14px;margin-top:2px}
+.tag{font-size:12px;font-weight:600;padding:1px 7px;border-radius:999px;background:#EDF0F2;color:var(--muted);margin-left:6px}
 .note{color:var(--muted);font-size:14px;margin:8px 0 4px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -111,6 +121,14 @@ button small{display:block;font-weight:400;font-size:13px;color:inherit;opacity:
       <section><h2>Open positions</h2><div id="pos"></div></section>
       <section><h2>Closed today</h2><div id="closed"></div></section>
       <section><h2>Watchlist</h2><div id="watch"></div></section>
+      <section><h2>Stock tracker</h2>
+        <p class="note">Alerts only. This card never places orders. It runs the same strategy on your own list so you can place trades yourself in Zerodha. The bot keeps trading its own watchlist.</p>
+        <div class="trk-add"><input id="trk-in" placeholder="Add NSE symbols, e.g. SBIN, ITC, AXISBANK" aria-label="Symbols to track"><button id="trk-btn" class="primary">Add</button></div>
+        <p class="note" id="trk-msg"></p>
+        <label class="note"><input type="checkbox" id="trk-snd"> Play a sound on new alerts</label>
+        <h2 style="margin-top:12px">Alerts today</h2><div id="alerts"></div>
+        <h2 style="margin-top:12px">Tracked stocks</h2><div id="tracker"></div>
+      </section>
     </div>
     <div>
       <section><h2>Controls</h2>
@@ -147,6 +165,9 @@ const sgn = n => (n > 0 ? "+" : "") + inr(n);
 const cls = n => n > 0 ? "gain" : n < 0 ? "loss" : "";
 let token = sessionStorage.getItem("tok") || "";
 let S = null;
+const seen = new Set(); let seenReady = false, flashUntil = 0;
+function beep(){ try { const c = new (window.AudioContext || window.webkitAudioContext)(), o = c.createOscillator(), g = c.createGain();
+  o.connect(g); g.connect(c.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(c.currentTime + 0.35); } catch (e) {} }
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 
@@ -215,6 +236,22 @@ function render(s) {
     [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b>`}, {h: "LTP", n: 1, f: r => inr(r.ltp)},
      {h: "Opening range", n: 1, f: r => r.range ? `${inr(r.range.low)} to ${inr(r.range.high)}${r.range.complete ? "" : " (forming)"}` : "-"}], s.watch || []) || `<p class="empty">The watchlist appears after login.</p>`;
 
+  // tracker
+  const alerts = s.alerts || [];
+  const fresh = alerts.filter(a => !seen.has(a.id));
+  if (seenReady && fresh.some(a => !a.earlier)) { flashUntil = Date.now() + 60000; if ($("trk-snd").checked) beep(); }
+  alerts.forEach(a => seen.add(a.id)); seenReady = true;
+  const hot = Date.now() < flashUntil;
+  document.title = (hot ? "(!) " : "") + "Intraday desk";
+  $("alerts").innerHTML = alerts.length ? alerts.map((a, i) => `<div class="alert ${hot && i === 0 && !a.earlier ? "new" : ""}"><b class="${a.side}">${a.side}</b> <b>${esc(a.symbol)}</b> at ${esc(a.ts)}${a.earlier ? '<span class="tag">earlier today</span>' : ""}
+    <div class="lv">Entry ${inr(a.entry)} &nbsp; Stop ${inr(a.stop)} &nbsp; Target ${inr(a.target)} &nbsp; Qty ${a.qty}</div></div>`).join("") : `<p class="empty">No alerts yet today.</p>`;
+  $("tracker").innerHTML = table(
+    [{h: "Symbol", f: r => `<b>${esc(r.symbol)}</b>`}, {h: "LTP", n: 1, f: r => inr(r.ltp)},
+     {h: "Opening range", n: 1, f: r => r.range ? `${inr(r.range.low)} to ${inr(r.range.high)}${r.range.complete ? "" : " (forming)"}` : "-"},
+     {h: "Status", f: r => r.note ? esc(r.note) : (r.alerts ? r.alerts + " alert" + (r.alerts > 1 ? "s" : "") : "Waiting")},
+     {h: "", f: r => `<button class="x" data-sym="${esc(r.symbol)}" aria-label="Stop tracking ${esc(r.symbol)}">&times;</button>`}], s.tracker || []) || `<p class="empty">Nothing tracked yet.</p>`;
+  $("trk-btn").disabled = !s.connected;
+
   const r = s.rules || {};
   $("rules").innerHTML = r.max_open == null ? "" :
     `<li>Risk per trade: ${r.risk_per_trade_pct}% of capital</li><li>Max open positions: ${r.max_open}</li><li>No new entries after ${r.no_new_entry} IST</li><li>Automatic exit at ${r.square_off} IST</li><li>Capital: ${inr(s.capital, 0)}</li>`;
@@ -234,6 +271,20 @@ async function act(path, ok) {
   try { await api(path, "POST"); await tick(); } catch (e) { alert(e.message); }
 }
 
+$("trk-btn").onclick = async () => {
+  const v = $("trk-in").value.trim(); if (!v) return;
+  try {
+    const r = await api("/api/tracker/add?symbols=" + encodeURIComponent(v), "POST");
+    $("trk-msg").textContent = (r.added.length ? "Added: " + r.added.join(", ") + ". " : "") + (r.rejected.length ? "Not added: " + r.rejected.join("; ") : "");
+    if (r.added.length) $("trk-in").value = "";
+    tick();
+  } catch (e) { $("trk-msg").textContent = e.message; }
+};
+$("trk-in").addEventListener("keydown", e => { if (e.key === "Enter") $("trk-btn").click(); });
+$("tracker").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-sym]"); if (!b) return;
+  try { await api("/api/tracker/remove?symbol=" + encodeURIComponent(b.dataset.sym), "POST"); tick(); } catch (err) { alert(err.message); }
+});
 $("b-login").onclick = async () => { try { location.href = (await api("/api/login-url")).url; } catch (e) { alert(e.message); } };
 $("b-arm").onclick = () => {
   if (S.mode === "live") {
