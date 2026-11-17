@@ -11,6 +11,9 @@ Starts in **paper mode**. Nothing places a real order until you set `TRADING_MOD
 - Kill-switch (automatic at the loss limit, or manual): writes a daily lock first, cancels MIS orders, exits positions one by one with retries. Lock is stored in SQLite on a Railway Volume, so restarts and redeploys do not unlock it.
 - Dashboard: day P&L against the loss limit, positions, closed trades, opening ranges, activity log, Arm/Disarm/Kill controls.
 
+## Backtest diagnostics
+After a backtest the dashboard shows trade averages before and after charges, the win rate you need to break even, and breakdowns by long/short, stock, stop width, entry time, exit type and month. Rows with under 20 trades are flagged as noise.
+
 ## Stock tracker (alerts only)
 The dashboard's Stock tracker card follows any NSE stocks you add (up to 30) with the same strategy as the bot and lists each signal with entry, stop, target and a suggested quantity, so you can place those trades yourself in Zerodha. It never places orders and does not affect the bot's own watchlist. Alerts follow the bot's entry window; breakouts that happened before you added a stock appear tagged "earlier today". Tick the sound box to hear new alerts while the dashboard is open.
 
