@@ -310,6 +310,20 @@ async function btStatus(){
   }catch(e){}
 }
 $("bt-dl").onclick = async () => { try { await api("/api/backtest/download?days=" + encodeURIComponent($("bt-days").value), "POST"); btStatus(); } catch (e) { alert(e.message); } };
+function diagHtml(d) {
+  if (!d) return "";
+  const h = d.headline;
+  const cols = [{h: "", f: r => esc(r.label) + (r.small ? " *" : "")}, {h: "Trades", n: 1, f: r => r.trades}, {h: "Wins", n: 1, f: r => r.win_rate + "%"},
+    {h: "Before charges", n: 1, f: r => sgn(r.gross), c: r => cls(r.gross)}, {h: "Charges", n: 1, f: r => inr(r.cost)},
+    {h: "Net", n: 1, f: r => sgn(r.net), c: r => cls(r.net)}, {h: "Net per trade", n: 1, f: r => sgn(r.avg_net), c: r => cls(r.avg_net)}];
+  const block = (t, rows) => `<h2 style="margin-top:16px">${t}</h2>` + table(cols, rows);
+  return `<h2 style="margin-top:18px">Where the money goes</h2>
+    <p class="note">Across ${h.trades} trades, a trade makes ${sgn(h.gross_per_trade)} on average <b>before</b> charges and pays ${inr(h.charges_per_trade)} in charges, which is ${h.charges_pct_of_risk}% of the amount risked per trade. Net per trade: ${sgn(h.net_per_trade)}.</p>
+    <p class="note">Average winner ${inr(h.avg_win)}, average loser ${inr(h.avg_loss)}. You need to win ${h.breakeven_win_rate ?? "-"}% of trades to break even after charges. Actual win rate: ${h.win_rate}%. Average position value: ${inr(h.avg_position_value, 0)}.</p>` +
+    block("Long vs short", d.by_side) + block("By stock", d.by_symbol) + block("By stop width (distance from entry to stop)", d.by_stop_width) +
+    block("By entry time", d.by_entry_time) + block("By how the trade ended", d.by_exit) + block("By month", d.by_month) +
+    `<p class="note">* Fewer than 20 trades, so treat the row as noise. Don't pick the best-looking row after seeing results. Choose any rule change in advance, using the first 70% of days, and judge it only on the last 30%.</p>`;
+}
 $("bt-run").onclick = async () => {
   $("bt-out").innerHTML = `<p class="empty">Running...</p>`;
   try {
@@ -319,6 +333,7 @@ $("bt-run").onclick = async () => {
     $("bt-out").innerHTML = `<div class="tablewrap"><table><thead><tr><th>Period</th><th class="n">Days</th><th class="n">Trades</th><th class="n">Wins</th><th class="n">Profit factor</th><th class="n">Avg trade</th><th class="n">Net P&L</th><th class="n">Charges</th><th class="n">Worst drop</th></tr></thead><tbody>` +
       row("All", m.all) + row("First 70% of days", m.first_70) + row("Last 30% (unseen)", m.last_30) + `</tbody></table></div>` +
       `<p class="note">Net P&L is after Zerodha charges and slippage. A strategy is only interesting if the last 30% is also positive with enough trades (aim for 100 or more). Profit factor above 1.3 after charges is a reasonable bar. Past results do not guarantee future results.</p>`;
+    $("bt-out").innerHTML += diagHtml(r.diagnostics);
   } catch (e) { $("bt-out").innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
 };
 setInterval(() => { if (token) btStatus(); }, 4000);
