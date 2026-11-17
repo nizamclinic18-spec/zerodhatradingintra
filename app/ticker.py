@@ -29,6 +29,26 @@ class TickerService:
             if sym and t.get("last_price"):
                 self.engine.on_tick(sym, float(t["last_price"]))
 
+    def add(self, sym, token):
+        self.map[sym], self.rev[token] = token, sym
+        try:
+            if self.kws.is_connected():      # never call subscribe() while disconnected: it closes the socket
+                self.kws.subscribe([token])
+                self.kws.set_mode(self.kws.MODE_LTP, [token])
+        except Exception as e:
+            self.engine.event("WARN", f"Could not subscribe {sym} live: {e}")
+
+    def remove(self, sym):
+        token = self.map.pop(sym, None)
+        if token is None:
+            return
+        self.rev.pop(token, None)
+        try:
+            if self.kws.is_connected():
+                self.kws.unsubscribe([token])
+        except Exception:
+            pass
+
     def start(self):
         self.kws.connect(threaded=True)   # KiteTicker auto-reconnects
 

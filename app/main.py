@@ -31,6 +31,7 @@ class Runtime:
     error = None
     kite = None
     tokens = {}
+    all_tokens = {}
     bt = {"state": "idle", "msg": ""}
 
     def connect(self, access_token: str):
@@ -38,19 +39,77 @@ class Runtime:
         kite.set_access_token(access_token)
         kite.profile()  # raises if the token is bad
         wanted = set(cfg.watchlist)
-        toks = {i["tradingsymbol"]: i["instrument_token"] for i in kite.instruments("NSE")
-                if i["tradingsymbol"] in wanted and i["instrument_type"] == "EQ" and i["segment"] == "NSE"}
+        eq = {i["tradingsymbol"]: i["instrument_token"] for i in kite.instruments("NSE")
+              if i["instrument_type"] == "EQ" and i["segment"] == "NSE"}
+        toks = {s: eq[s] for s in wanted if s in eq}
         missing = wanted - set(toks)
         broker = LiveBroker(kite) if cfg.mode == "live" else PaperBroker()
-        self.kite, self.tokens = kite, toks
+        self.kite, self.tokens, self.all_tokens = kite, toks, eq
         self.shutdown()
         self.engine = Engine(cfg, store, broker)
         if missing:
             self.engine.event("WARN", f"Symbols not found on NSE: {sorted(missing)}")
         self.engine.start()
-        self.ticker = TickerService(cfg.api_key, access_token, toks, self.engine)
-        self.ticker.start()
+        gone = [s for s in self.engine.tracked if s not in eq]
+        for s in gone:
+            self.engine.track_remove(s)
+            self.engine.event("WARN", f"Tracker symbol {s} not found on NSE; removed")
+        track_toks = {s: eq[s] for s in self.engine.tracked}
+        self.ticker = TickerService(cfg.api_key, access_token, {**toks, **track_toks}, self.engine)
         self.error = None
+        # Warm-up (history replay, then live ticks) runs in the background so the login redirect is instant.
+        threading.Thread(target=self._warmup, args=(kite, toks, track_toks, self.engine, self.ticker), daemon=True).start()
+
+    def _history(self, kite, tok, now):
+        start = now.replace(hour=cfg.or_start.hour, minute=cfg.or_start.minute, second=0, microsecond=0, tzinfo=None)
+        rows = kite.historical_data(tok, start, now.replace(tzinfo=None), f"{cfg.candle_minutes}minute")
+        time.sleep(0.4)  # Kite allows about 3 history requests per second
+        return rows
+
+    def _warmup(self, kite, toks, track_toks, engine, ticker):
+        """After a restart or late login, rebuild today's opening ranges from Zerodha's price history."""
+        now = now_ist()
+        if now.weekday() < 5 and now.time() >= cfg.or_start:
+            for sym, tok in toks.items():
+                try:
+                    engine.replay(sym, self._history(kite, tok, now))
+                except Exception as e:
+                    engine.event("WARN", f"Could not rebuild today's candles for {sym}: {e}")
+            for sym, tok in track_toks.items():
+                try:
+                    engine.replay_tracked(sym, self._history(kite, tok, now))
+                except Exception as e:
+                    engine.event("WARN", f"Could not rebuild tracker candles for {sym}: {e}")
+        if engine is self.engine:
+            ticker.start()
+
+    def track_add(self, symbols):
+        eng = self.engine
+        if not eng:
+            raise HTTPException(409, "Log in to Zerodha first")
+        added, rejected = [], []
+        for sym in symbols:
+            tok = self.all_tokens.get(sym)
+            if not tok:
+                rejected.append(f"{sym} (not an NSE equity symbol)")
+            elif not eng.track_add(sym):
+                rejected.append(f"{sym} (already tracked, or the 30-stock limit is reached)")
+            else:
+                self.ticker.add(sym, tok)
+                try:
+                    now = now_ist()
+                    if now.weekday() < 5 and now.time() >= cfg.or_start:
+                        eng.replay_tracked(sym, self._history(self.kite, tok, now))
+                except Exception as e:
+                    eng.event("WARN", f"Could not load today's candles for {sym}: {e}")
+                added.append(sym)
+        return {"added": added, "rejected": rejected}
+
+    def track_remove(self, sym):
+        if self.engine:
+            self.engine.track_remove(sym)
+            if sym not in self.engine.watch and self.ticker:
+                self.ticker.remove(sym)
 
     def restore(self):
         tok = store.get_token(now_ist().date().isoformat())
@@ -212,3 +271,20 @@ def bt_run(request: Request, strategy: str = "orb"):
         raise HTTPException(409, "No price history yet. Click 'Download price history' first.")
     res["strategy"] = strategy
     return res
+
+
+# ---------- stock tracker (alerts only) ----------
+@app.post("/api/tracker/add")
+def tracker_add(request: Request, symbols: str = ""):
+    auth(request)
+    syms = [x.strip().upper() for x in symbols.replace("\n", ",").split(",") if x.strip()]
+    if not syms:
+        raise HTTPException(400, "Enter at least one NSE symbol")
+    return rt.track_add(syms[:30])
+
+
+@app.post("/api/tracker/remove")
+def tracker_remove(request: Request, symbol: str = ""):
+    auth(request)
+    rt.track_remove(symbol.strip().upper())
+    return {"ok": True}

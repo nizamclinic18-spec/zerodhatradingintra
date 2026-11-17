@@ -7,6 +7,7 @@ class EMACrossStrategy:
     def __init__(self, cfg, fast=5, slow=13, swing=3):
         self.cfg, self.fast, self.slow, self.swing = cfg, fast, slow, swing
         self.st = {}
+        self.notes = []
 
     def levels(self, symbol):
         return None
@@ -30,6 +31,7 @@ class EMACrossStrategy:
             return None
         risk = abs(px - stop)
         if risk <= 0 or risk / px * 100 > self.cfg.max_stop_pct:
+            self.notes.append(f"{symbol} {side} crossover skipped: stop would be {risk / px * 100:.1f}% away, limit is {self.cfg.max_stop_pct:.1f}% (MAX_STOP_PCT)")
             return None
         target = px + self.cfg.target_r * risk if side == "BUY" else px - self.cfg.target_r * risk
         return Signal(symbol, side, px, stop, target)

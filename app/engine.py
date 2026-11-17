@@ -1,10 +1,12 @@
+import json
 import logging
 import threading
 import time
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 from .candles import CandleBuilder
-from .clock import now_ist
+from .clock import IST, now_ist
 from .risk import Risk
 from .registry import make_strategy
 
@@ -20,6 +22,11 @@ class Engine:
     def __init__(self, cfg, store, broker, now_fn=now_ist):
         self.cfg, self.store, self.broker, self.now = cfg, store, broker, now_fn
         self.risk = Risk(cfg)
+        self.watch = set(cfg.watchlist)
+        self.tracked = []                      # user's tracker list (alerts only, never trades)
+        self.tracker_strategy = make_strategy(cfg)
+        self.alerts = []
+        self.track_notes = {}
         self.strategy = make_strategy(cfg)
         self.candles = CandleBuilder(cfg.candle_minutes)
         self.ltp = {}
@@ -40,9 +47,14 @@ class Engine:
         if lk:
             self.killed = True
             self.event("CRITICAL", f"Locked for today: {lk['reason']}")
-        # Adopt positions that already exist (e.g. after a restart) so risk and EOD cover them.
+        self._restore()
+        self._reconcile()
+        self._load_tracker()
+        # Adopt positions the bot is not tracking so the loss limit and EOD exit still cover them.
         try:
             for p in broker.positions():
+                if p["symbol"] in self.trades:
+                    continue
                 self.done.add(p["symbol"])
                 self.event("WARN", f"Existing position found at start: {p['symbol']} qty {p['qty']} (not managed by strategy; covered by loss limit and EOD square-off)")
         except Exception as e:
@@ -59,6 +71,141 @@ class Engine:
         except Exception:
             pass
 
+    # ---------- restart safety ----------
+    def _persist(self):
+        """Saves what the bot needs to resume after a restart: armed flag, attempted symbols, open trades, paper broker state."""
+        try:
+            with self._lock:
+                st = {"armed": self.armed, "done": sorted(self.done),
+                      "trades": {k: dict(v) for k, v in self.trades.items()}}
+                if hasattr(self.broker, "snapshot"):
+                    st["paper"] = self.broker.snapshot()
+                self.store.set(f"state:{self.today()}", json.dumps(st))
+        except Exception as e:
+            log.warning("persist failed: %s", e)
+
+    def _restore(self):
+        raw = self.store.get(f"state:{self.today()}")
+        if not raw:
+            return
+        try:
+            st = json.loads(raw)
+            if st.get("paper") and hasattr(self.broker, "restore"):
+                self.broker.restore(st["paper"])
+            self.done = set(st.get("done", []))
+            for sym, tr in st.get("trades", {}).items():
+                tr["state"] = "open"
+                self.trades[sym] = tr
+            if st.get("armed") and not self.killed:
+                self.armed = True
+            self.event("INFO", f"Restored after restart: armed={self.armed}, open trades={sorted(self.trades)}, already attempted today={sorted(self.done)}")
+        except Exception as e:
+            self.event("ERROR", f"Could not restore saved state: {e}")
+
+    def _reconcile(self):
+        """Trades we think are open but the broker no longer shows (stop hit while the bot was down)."""
+        if not self.trades:
+            return
+        try:
+            live = {p["symbol"] for p in self.broker.positions()}
+        except Exception as e:
+            self.event("WARN", f"Could not check positions after restart: {e}")
+            return
+        for sym, tr in list(self.trades.items()):
+            if sym in live:
+                continue
+            px, reason = tr["entry"], "closed-while-down"
+            try:
+                if tr.get("sl_id"):
+                    st = self.broker.get_order(tr["sl_id"])
+                    if st["status"] == "COMPLETE":
+                        px, reason = st["avg"], "stop"
+            except Exception:
+                pass
+            self._finalize(tr, px, reason)
+
+    def replay(self, sym, rows):
+        """Feeds today's earlier candles (from Zerodha history) into the strategy after a restart,
+        so opening ranges are rebuilt. Signals from the past are never traded."""
+        now = self.now()
+        for d in rows:
+            c = {"start": d["date"].astimezone(IST), "o": d["open"], "h": d["high"], "l": d["low"], "c": d["close"]}
+            self.ltp.setdefault(sym, c["c"])
+            if c["start"] + timedelta(minutes=self.cfg.candle_minutes) <= now:
+                sig = self.strategy.on_candle(sym, c)
+                if sig:
+                    self.event("INFO", f"{sym} {sig.side} breakout at {c['start'].strftime('%H:%M')} happened before the bot had data; not chasing it")
+            else:
+                self.candles.cur[sym] = dict(c)   # candle still in progress
+        self._drain_notes()
+        self._persist()
+
+    # ---------- tracker (alerts only, no orders) ----------
+    def _load_tracker(self):
+        try:
+            raw = self.store.get("tracker:list")
+            self.tracked = json.loads(raw) if raw else []
+            raw = self.store.get(f"alerts:{self.today()}")
+            self.alerts = json.loads(raw) if raw else []
+        except Exception as e:
+            self.event("WARN", f"Could not load tracker: {e}")
+
+    def track_add(self, sym):
+        with self._lock:
+            if sym in self.tracked or len(self.tracked) >= 30:
+                return False
+            self.tracked.append(sym)
+            self.store.set("tracker:list", json.dumps(self.tracked))
+        return True
+
+    def track_remove(self, sym):
+        with self._lock:
+            if sym in self.tracked:
+                self.tracked.remove(sym)
+                self.track_notes.pop(sym, None)
+                self.store.set("tracker:list", json.dumps(self.tracked))
+
+    def _alert(self, sym, sig, ts, earlier=False):
+        qty = self.risk.size(sig.entry, sig.stop)
+        a = {"id": f"{self.today()}-{len(self.alerts) + 1}", "ts": ts, "symbol": sym, "side": sig.side,
+             "entry": round(sig.entry, 2), "stop": round(sig.stop, 2), "target": round(sig.target, 2),
+             "qty": qty, "earlier": earlier}
+        self.alerts.append(a)
+        self.store.set(f"alerts:{self.today()}", json.dumps(self.alerts))
+        self.event("INFO", f"TRACKER alert{' (earlier today)' if earlier else ''}: {sig.side} {sym} entry {sig.entry:.2f} stop {sig.stop:.2f} target {sig.target:.2f}")
+
+    def _track_candle(self, sym, c, earlier=False):
+        sig = self.tracker_strategy.on_candle(sym, c)
+        notes = getattr(self.tracker_strategy, "notes", None)
+        if notes:
+            self.track_notes[sym] = notes[-1]
+            del notes[:]
+        if not sig:
+            return
+        close_dt = c["start"] + timedelta(minutes=self.cfg.candle_minutes)
+        if self.cfg.or_end <= close_dt.time() < self.cfg.no_new_entry:
+            self._alert(sym, sig, close_dt.strftime("%H:%M"), earlier)
+        else:
+            self.track_notes[sym] = f"{sig.side} signal at {close_dt:%H:%M} was outside the entry window, no alert"
+
+    def replay_tracked(self, sym, rows):
+        """Rebuilds today's opening range for a newly tracked stock and reports breakouts that already happened."""
+        now = self.now()
+        for d in rows:
+            c = {"start": d["date"].astimezone(IST), "o": d["open"], "h": d["high"], "l": d["low"], "c": d["close"]}
+            self.ltp.setdefault(sym, c["c"])
+            if c["start"] + timedelta(minutes=self.cfg.candle_minutes) <= now:
+                self._track_candle(sym, c, earlier=True)
+            else:
+                self.candles.cur[sym] = dict(c)
+
+    def _drain_notes(self):
+        notes = getattr(self.strategy, "notes", None)
+        if notes:
+            for m in list(notes):
+                self.event("INFO", m)
+            del notes[:]
+
     def start(self):
         self._thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="watchdog")
         self._thread.start()
@@ -74,11 +221,13 @@ class Engine:
             if self.eod_done:
                 return False, "Session already squared off for today."
             self.armed = True
+        self._persist()
         self.event("INFO", f"ARMED in {self.cfg.mode.upper()} mode")
         return True, "armed"
 
     def disarm(self):
         self.armed = False
+        self._persist()
         self.event("INFO", "DISARMED: no new entries. Open positions keep their stop-loss.")
 
     # ---------- ticks ----------
@@ -89,10 +238,16 @@ class Engine:
         self.broker.on_tick(symbol, ltp)
         candle = self.candles.update(symbol, ltp, ts)
         if candle:
-            sig = self.strategy.on_candle(symbol, candle)
-            if sig and self.armed and not self.killed:
-                self.event("INFO", f"Signal {sig.side} {sig.symbol} entry {sig.entry:.2f} stop {sig.stop:.2f} target {sig.target:.2f}")
-                self._pool.submit(self._safe, self._enter, sig)
+            sig = self.strategy.on_candle(symbol, candle) if symbol in self.watch else None
+            self._drain_notes()
+            if sig:
+                if self.armed and not self.killed:
+                    self.event("INFO", f"Signal {sig.side} {sig.symbol} entry {sig.entry:.2f} stop {sig.stop:.2f} target {sig.target:.2f}")
+                    self._pool.submit(self._safe, self._enter, sig)
+                else:
+                    self.event("INFO", f"{symbol} {sig.side} signal ignored: bot is {'locked for today' if self.killed else 'disarmed'}")
+            if symbol in self.tracked:
+                self._track_candle(symbol, candle)
         tr = self.trades.get(symbol)
         if tr and tr["state"] == "open":
             hit = ltp >= tr["target"] if tr["side"] == "BUY" else ltp <= tr["target"]
@@ -107,15 +262,21 @@ class Engine:
             self.event("ERROR", f"{fn.__name__} failed: {e}")
 
     # ---------- entry ----------
-    def _can_enter(self, sym):
+    def _block_reason(self, sym):
         t = self.now().time()
-        if not self.armed or self.killed or self.eod_done:
-            return False
-        if self.store.lock_info(self.today()):
-            return False
+        if self.killed or self.store.lock_info(self.today()):
+            return "locked for today"
+        if not self.armed:
+            return "bot is disarmed"
+        if self.eod_done:
+            return "session already squared off"
         if not (self.cfg.or_end <= t < self.cfg.no_new_entry):
-            return False
-        return sym not in self.done and sym not in self.pending
+            return f"outside the entry window ({self.cfg.or_end:%H:%M} to {self.cfg.no_new_entry:%H:%M} IST)"
+        if sym in self.done:
+            return "already attempted today"
+        if sym in self.pending:
+            return "entry already in progress"
+        return ""
 
     def _await_fill(self, oid, timeout=6.0):
         end = time.time() + timeout
@@ -134,13 +295,16 @@ class Engine:
     def _enter(self, sig):
         sym = sig.symbol
         with self._lock:
-            if not self._can_enter(sym):
+            why = self._block_reason(sym)
+            if why:
+                self.event("INFO", f"{sym} signal skipped: {why}")
                 return
             if len(self.trades) + len(self.pending) >= self.cfg.max_open_positions:
                 self.event("INFO", f"Max open positions reached, skipping {sym}")
                 return
             self.pending.add(sym)
             self.done.add(sym)
+        self._persist()
         try:
             if len(self.broker.positions()) >= self.cfg.max_open_positions:
                 self.event("INFO", f"Broker already shows max positions, skipping {sym}")
@@ -163,6 +327,7 @@ class Engine:
                      "target": sig.target, "sl_id": None, "state": "open",
                      "opened": self.now().strftime("%H:%M:%S")}
             self.trades[sym] = trade
+            self._persist()
             if gapped:
                 self.event("WARN", f"{sym} filled beyond its stop; exiting immediately")
                 self._close_trade(sym, "filled-beyond-stop")
@@ -172,6 +337,7 @@ class Engine:
             limit = rt(trig * (1 - buf)) if exit_side == "SELL" else rt(trig * (1 + buf))
             try:
                 trade["sl_id"] = self.broker.place_sl(sym, exit_side, filled, trig, limit)
+                self._persist()
                 self.event("INFO", f"STOP placed {exit_side} {filled} {sym} trigger {trig:.2f} limit {limit:.2f}")
             except Exception as e:
                 self.event("CRITICAL", f"Stop-loss placement FAILED for {sym} ({e}). Flattening now.")
@@ -189,6 +355,7 @@ class Engine:
                              exit_px, pnl, reason, tr["opened"], now.strftime("%H:%M:%S"))
         self.event("INFO", f"CLOSED {tr['symbol']} {reason} @ {exit_px:.2f}  gross P&L {pnl:+.2f}")
         self.trades.pop(tr["symbol"], None)
+        self._persist()
 
     def _close_trade(self, sym, reason):
         tr = self.trades.get(sym)
@@ -257,6 +424,7 @@ class Engine:
                 return
             self.killed = True
             self.armed = False
+        self._persist()
         self.event("CRITICAL", f"KILL-SWITCH: {reason}")
         if lock:
             self.store.lock_today(self.today(), reason, self.now().isoformat())  # lock first, trade after
@@ -275,6 +443,7 @@ class Engine:
                 self.watchdog_once()
             except Exception as e:
                 self.event("WARN", f"watchdog error: {e}")
+            self._persist()
 
     def watchdog_once(self):
         now = self.now()
@@ -315,6 +484,10 @@ class Engine:
             "open_trades": [{k: v for k, v in t.items() if k != "sl_id"} for t in self.trades.values()],
             "closed_trades": self.store.trades_for(self.today()),
             "watch": [{"symbol": s, "ltp": self.ltp.get(s), "range": self.strategy.levels(s)} for s in self.cfg.watchlist],
+            "tracker": [{"symbol": s, "ltp": self.ltp.get(s), "range": self.tracker_strategy.levels(s),
+                         "note": self.track_notes.get(s), "alerts": sum(1 for a in self.alerts if a["symbol"] == s)}
+                        for s in self.tracked],
+            "alerts": list(reversed(self.alerts))[:60],
             "last_tick_age": None if not self.last_tick else round((now - self.last_tick).total_seconds(), 1),
             "events": self.store.recent_events(60),
             "rules": {"risk_per_trade_pct": self.cfg.risk_per_trade_pct, "max_open": self.cfg.max_open_positions,

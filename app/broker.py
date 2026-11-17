@@ -7,7 +7,7 @@ cancel(order_id), cancel_all_open()
 positions() -> [{"symbol","qty","avg","ltp","pnl"}]  (non-zero MIS only)
 day_pnl() -> float (realized + unrealized, MIS)
 """
-import itertools
+import json
 import threading
 
 OPEN_STATES = ("OPEN", "TRIGGER PENDING", "VALIDATION PENDING", "MODIFY PENDING", "PUT ORDER REQ RECEIVED")
@@ -76,7 +76,7 @@ class PaperBroker:
         self.ltp = {}
         self.orders = {}
         self.pos = {}
-        self._ids = itertools.count(1)
+        self._n = 0
         self._l = threading.RLock()
 
     def _fill(self, o, price):
@@ -101,7 +101,8 @@ class PaperBroker:
             px = self.ltp.get(symbol)
             if not px:
                 raise RuntimeError(f"no price for {symbol}")
-            oid = f"P{next(self._ids)}"
+            self._n += 1
+            oid = f"P{self._n}"
             o = {"id": oid, "symbol": symbol, "side": side, "qty": int(qty), "type": "MARKET",
                  "status": "OPEN", "filled": 0, "avg": 0.0}
             self.orders[oid] = o
@@ -110,7 +111,8 @@ class PaperBroker:
 
     def place_sl(self, symbol, side, qty, trigger, limit):
         with self._l:
-            oid = f"P{next(self._ids)}"
+            self._n += 1
+            oid = f"P{self._n}"
             self.orders[oid] = {"id": oid, "symbol": symbol, "side": side, "qty": int(qty), "type": "SL",
                                 "trigger": trigger, "limit": limit, "status": "OPEN", "filled": 0,
                                 "avg": 0.0, "triggered": False}
@@ -149,6 +151,14 @@ class PaperBroker:
                     inside = ltp >= o["limit"] if o["side"] == "SELL" else ltp <= o["limit"]
                     if inside:
                         self._fill(o, ltp)
+
+    def snapshot(self):
+        with self._l:
+            return json.loads(json.dumps({"orders": self.orders, "pos": self.pos, "n": self._n}))
+
+    def restore(self, d):
+        with self._l:
+            self.orders, self.pos, self._n = d["orders"], d["pos"], d["n"]
 
     def positions(self):
         with self._l:
