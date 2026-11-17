@@ -77,6 +77,11 @@ button small{display:block;font-weight:400;font-size:13px;color:inherit;opacity:
 #gate input{width:100%;font:16px var(--ui);padding:11px;border:1.5px solid var(--line);border-radius:8px;margin:10px 0 12px}
 #gate p{margin:0;color:var(--muted)}
 #gate .err{color:var(--loss);min-height:20px;margin:0 0 8px}
+.bt-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.bt-row select,.bt-row input{font:16px var(--ui);padding:9px 10px;border:1.5px solid var(--line);border-radius:8px;background:var(--surface)}
+.bt-row input{width:80px}
+.bt-row button{padding:10px 14px}
+.note{color:var(--muted);font-size:14px;margin:8px 0 4px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -120,6 +125,19 @@ button small{display:block;font-weight:400;font-size:13px;color:inherit;opacity:
       <section><h2>Activity</h2><div class="log" id="log"></div></section>
     </div>
   </div>
+  <section id="btsec"><h2>Backtest a strategy</h2>
+    <p class="note">Replays past 5-minute prices through the same rules, risk limits and Zerodha charges as the live bot. Uses your watchlist.</p>
+    <div class="bt-row">
+      <label>Days of history <input id="bt-days" type="number" value="90" min="10" max="365"></label>
+      <button id="bt-dl">Download price history</button>
+      <span class="note" id="bt-msg"></span>
+    </div>
+    <div class="bt-row">
+      <label>Strategy <select id="bt-strat"></select></label>
+      <button class="primary" id="bt-run">Run backtest</button>
+    </div>
+    <div id="bt-out"></div>
+  </section>
 </div>
 
 <script>
@@ -230,6 +248,30 @@ $("b-kill").onclick = () => { if (confirm("Cancel all orders, exit every positio
 if (!token) showGate(""); else tick();
 setInterval(tick, 2000);
 if (new URLSearchParams(location.search).get("login") === "failed") alert("Zerodha login failed. Check the redirect URL and API secret.");
+
+async function btStatus(){
+  try{
+    const s = await api("/api/backtest/status");
+    $("bt-msg").textContent = s.msg;
+    const sel = $("bt-strat");
+    if (!sel.options.length) sel.innerHTML = s.strategies.map(n => `<option>${esc(n)}</option>`).join("");
+    $("bt-dl").disabled = s.state === "running";
+  }catch(e){}
+}
+$("bt-dl").onclick = async () => { try { await api("/api/backtest/download?days=" + encodeURIComponent($("bt-days").value), "POST"); btStatus(); } catch (e) { alert(e.message); } };
+$("bt-run").onclick = async () => {
+  $("bt-out").innerHTML = `<p class="empty">Running...</p>`;
+  try {
+    const r = await api("/api/backtest/run?strategy=" + encodeURIComponent($("bt-strat").value));
+    const row = (name, b) => `<tr><td>${name}</td><td class="n">${b.days}</td><td class="n">${b.trades}</td><td class="n">${b.win_rate}%</td><td class="n">${b.profit_factor ?? "-"}</td><td class="n ${cls(b.avg_trade)}">${sgn(b.avg_trade)}</td><td class="n ${cls(b.net)}">${sgn(b.net)}</td><td class="n">${inr(b.costs)}</td><td class="n">${inr(b.max_drawdown)}</td></tr>`;
+    const m = r.summary;
+    $("bt-out").innerHTML = `<div class="tablewrap"><table><thead><tr><th>Period</th><th class="n">Days</th><th class="n">Trades</th><th class="n">Wins</th><th class="n">Profit factor</th><th class="n">Avg trade</th><th class="n">Net P&L</th><th class="n">Charges</th><th class="n">Worst drop</th></tr></thead><tbody>` +
+      row("All", m.all) + row("First 70% of days", m.first_70) + row("Last 30% (unseen)", m.last_30) + `</tbody></table></div>` +
+      `<p class="note">Net P&L is after Zerodha charges and slippage. A strategy is only interesting if the last 30% is also positive with enough trades (aim for 100 or more). Profit factor above 1.3 after charges is a reasonable bar. Past results do not guarantee future results.</p>`;
+  } catch (e) { $("bt-out").innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
+};
+setInterval(() => { if (token) btStatus(); }, 4000);
+if (token) btStatus();
 </script>
 </body>
 </html>
