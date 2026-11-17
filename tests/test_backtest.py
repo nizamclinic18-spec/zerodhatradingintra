@@ -37,3 +37,17 @@ def test_breakout_trade_hits_target_and_pays_costs():
     assert trades[0]["net"] < trades[0]["gross"]
     s = summarize(trades, {"2026-11-02"})
     assert s["all"]["trades"] == 1 and s["all"]["costs"] > 0
+
+
+def test_diagnostics_breakdowns():
+    from app.backtest import diagnostics
+    cf = cfg()
+    base = [(100, 100.4, 99.8, 100.2)] * 3
+    cs = {"TCS": day_candles(datetime(2026, 11, 2).date(),
+                             base + [(100.2, 100.8, 100.2, 100.7), (100.7, 101.0, 100.6, 100.9), (100.9, 102.8, 100.9, 102.0)] + [(102, 102, 101.9, 102)] * 60)}
+    trades = run(cf, cs, lambda c: make_strategy(c, "orb"), slippage_bps=0)
+    d = diagnostics(cf, trades)
+    assert d["headline"]["trades"] == 1 and d["headline"]["charges_per_trade"] > 0
+    assert d["by_exit"][0]["label"] == "target" and d["by_side"][0]["label"].startswith("Long")
+    assert d["by_stop_width"][0]["small"] is True and d["by_entry_time"][0]["label"] == "09:30 to 10:00"
+    assert diagnostics(cf, []) is None
