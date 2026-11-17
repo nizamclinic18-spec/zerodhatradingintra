@@ -22,6 +22,9 @@ Starts in **paper mode**. Nothing places a real order until you set `TRADING_MOD
 4. Generate a domain in Railway. In the Kite developer console set the **Redirect URL** to `https://<your-domain>/kite/callback`.
 5. Static IP: from 1 April 2026 Zerodha accepts order placement (place/modify/cancel) only from a whitelisted static IP. Paper mode places no orders, so you can test without it. Before going live, get a fixed outbound IP (check Railway's static outbound IP option for your plan, or use a small VPS) and add it in the Kite developer console.
 
+## Deploy on AWS Lightsail instead
+See `deploy/lightsail/README.md`. `railway.json` is ignored there. Use this route if you need your own static IP for live orders.
+
 ## Every trading morning
 Open the dashboard, Log in to Zerodha (login expires daily, do not automate it), check the watchlist shows prices, then Arm before 09:30.
 
